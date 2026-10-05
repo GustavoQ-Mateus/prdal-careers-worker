@@ -27,6 +27,7 @@ export interface RepositorioJobs {
   liberarComErro(id: string, worker: string, erro: string): Promise<boolean>;
   falharDefinitivo(id: string, worker: string, erro: string): Promise<boolean>;
   devolver(id: string, worker: string): Promise<boolean>;
+  criarExclusoesVencidas(limite: number): Promise<JobParaReenviar[]>;
   paraReenviar(pendenteAntigoS: number, reenvioS: number, limite: number): Promise<JobParaReenviar[]>;
   orfaosEsgotados(maxTentativas: number, reenvioS: number, erro: string): Promise<JobOrfaoEsgotado[]>;
   estado(id: string): Promise<StatusJob | null>;
@@ -101,6 +102,29 @@ export class RepositorioJobsPostgres implements RepositorioJobs {
              atualizado_em = ${AGORA}
        WHERE id = ${id} AND status = 'PROCESSANDO' AND locked_by = ${worker}`;
     return n > 0;
+  }
+
+  async criarExclusoesVencidas(limite: number): Promise<JobParaReenviar[]> {
+    const usuarios = await this.prisma.usuario.findMany({
+      where: { exclusaoAgendadaPara: { lte: new Date() } },
+      select: { id: true },
+      orderBy: { exclusaoAgendadaPara: 'asc' },
+      take: limite,
+    });
+    const criados: JobParaReenviar[] = [];
+    for (const usuario of usuarios) {
+      const ativo = await this.prisma.job.findFirst({
+        where: { usuarioId: usuario.id, tipo: 'excluir_conta', status: { in: ['PENDENTE', 'PROCESSANDO'] } },
+      });
+      if (ativo) continue;
+      try {
+        const job = await this.prisma.job.create({ data: { tipo: 'excluir_conta', usuarioId: usuario.id, referenciaId: usuario.id } });
+        criados.push({ id: job.id, tipo: job.tipo });
+      } catch (erro) {
+        if ((erro as { code?: string }).code !== 'P2002' && (erro as { code?: string }).code !== 'P2003') throw erro;
+      }
+    }
+    return criados;
   }
 
   async paraReenviar(pendenteAntigoS: number, reenvioS: number, limite: number): Promise<JobParaReenviar[]> {

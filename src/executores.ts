@@ -5,6 +5,7 @@ import { ExecutorKeywords } from './executores/keywords';
 import { ExecutorImportacao, ExecutorReindexacao } from './executores/lotes';
 import { ExecutorPacote } from './executores/pacote';
 import { ExecutorExportacao } from './executores/exportacao';
+import { ExecutorExclusao } from './executores/exclusao';
 import { Rag } from './rag';
 import type { Executores } from './worker';
 
@@ -26,5 +27,6 @@ export function montarExecutores({ prisma, ia, documentos, armazenamento }: Depe
     reindexar_contexto: new ExecutorReindexacao(prisma, rag),
     empacotar_curriculo: new ExecutorPacote(prisma, arquivos),
     exportar_dados: new ExecutorExportacao(prisma, arquivos),
+    excluir_conta: new ExecutorExclusao(prisma, arquivos),
   };
 }

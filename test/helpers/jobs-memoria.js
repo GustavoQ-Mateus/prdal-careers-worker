@@ -57,6 +57,10 @@ class JobsMemoria {
     return !!job;
   }
 
+  async criarExclusoesVencidas() {
+    return [];
+  }
+
   async paraReenviar() {
     const saida = [...this.jobs.values()].filter((j) => j.status === 'PENDENTE' && !j.enfileiradoEm);
     saida.forEach((j) => (j.enfileiradoEm = Date.now()));

@@ -14,6 +14,12 @@ class ArmazenamentoMemoria {
     return objeto.dados;
   }
 
+  async apagarPrefixo(prefixo) {
+    for (const chave of this.objetos.keys()) {
+      if (chave.startsWith(prefixo)) this.objetos.delete(chave);
+    }
+  }
+
   async verificar() {}
 }
 
