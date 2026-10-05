@@ -13,6 +13,7 @@
     "prisma:gerar": "node scripts/gerar-prisma.js"
   },
   "dependencies": {
+    "@aws-sdk/client-lambda": "^3.1146.0",
     "@aws-sdk/client-s3": "^3.1146.0",
     "@aws-sdk/client-sqs": "^3.1146.0",
     "@prisma/client": "^6.19.3",
