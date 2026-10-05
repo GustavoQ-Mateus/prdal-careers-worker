@@ -319,15 +319,21 @@ export class ExecutorGeracao implements Executor {
     }
   }
 
+  private contarPaginas(pdf: Buffer & { paginas?: number }, curriculoId: string): number {
+    if (Number.isSafeInteger(pdf.paginas) && pdf.paginas! > 0) return pdf.paginas!;
+    this.logger.warn('doc-service sem contagem valida; usando regex como reserva', { codigo: 'paginas_pdf_por_regex', curriculoId });
+    return contarPaginasPdf(pdf);
+  }
+
   private async renderizar(usuarioId: string, curriculoId: string, markdown: string): Promise<Renderizacao> {
     try {
       let template: string | undefined;
       let pdf = await this.documentos.renderPdf(markdown);
-      let paginas = contarPaginasPdf(pdf);
+      let paginas = this.contarPaginas(pdf, curriculoId);
       if (paginas > 1) {
         template = 'compact';
         pdf = await this.documentos.renderPdf(markdown, template);
-        paginas = contarPaginasPdf(pdf);
+        paginas = this.contarPaginas(pdf, curriculoId);
       }
       const docx = await this.documentos.renderDocx(markdown, template);
       const docxPath = await this.armazenamento.gravar(chaveDoCurriculo(usuarioId, curriculoId, 'docx'), docx, TIPOS_ARQUIVO.docx);

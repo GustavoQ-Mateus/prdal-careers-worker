@@ -148,7 +148,13 @@ export async function postar(
     const dados = await lerCorpo(resposta);
     throw new ErroDoServico(servico, resposta.status, detalheDo(dados), dados);
   }
-  if (opcoes.binario) return Buffer.from(await resposta.arrayBuffer());
+  if (opcoes.binario) {
+    const buffer = Buffer.from(await resposta.arrayBuffer());
+    const cabecalho = resposta.headers.get('X-Paginas');
+    const paginas = cabecalho && /^\d+$/.test(cabecalho) ? Number(cabecalho) : 0;
+    if (Number.isSafeInteger(paginas) && paginas > 0) Object.assign(buffer, { paginas });
+    return buffer;
+  }
   return resposta.json();
 }
 
@@ -283,7 +289,7 @@ export class IaHttp implements Ia {
 }
 
 export interface Documentos {
-  renderPdf(markdown: string, template?: string): Promise<Buffer>;
+  renderPdf(markdown: string, template?: string): Promise<Buffer & { paginas?: number }>;
   renderDocx(markdown: string, template?: string): Promise<Buffer>;
 }
 

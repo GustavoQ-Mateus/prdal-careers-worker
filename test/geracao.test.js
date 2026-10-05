@@ -249,3 +249,55 @@ test('geracao ja concluida nao roda de novo e job sem entrada falha com mensagem
   const { servico: semEntrada } = executor(banco());
   await assert.rejects(semEntrada.executar(job({ entrada: null })), (err) => err.message === ENTRADA_AUSENTE);
 });
+
+
+test('contagem do doc-service prevalece sobre a regex do pdf', async () => {
+  const templates = [];
+  const { servico } = executor(banco(), {
+    documentos: {
+      renderPdf: async (_, template) => { templates.push(template); return Object.assign(pdf(2), { paginas: 1 }); },
+      renderDocx: async () => Buffer.from('docx'),
+    },
+  });
+  const avisos = [];
+  servico.logger.warn = (mensagem, campos) => avisos.push([mensagem, campos]);
+  const resultado = await servico.executar(job());
+  assert.equal(resultado.paginas, 1);
+  assert.deepEqual(templates, [undefined]);
+  assert.equal(avisos.length, 0);
+});
+
+test('sem contagem usa regex, compacta e registra a reserva', async () => {
+  const templates = [];
+  const { servico } = executor(banco(), {
+    documentos: {
+      renderPdf: async (_, template) => { templates.push(template); return pdf(template ? 1 : 2); },
+      renderDocx: async () => Buffer.from('docx'),
+    },
+  });
+  const avisos = [];
+  servico.logger.warn = (mensagem, campos) => avisos.push(campos);
+  const resultado = await servico.executar(job());
+  assert.equal(resultado.paginas, 1);
+  assert.deepEqual(templates, [undefined, 'compact']);
+  assert.deepEqual(avisos.map((aviso) => aviso.codigo), ['paginas_pdf_por_regex', 'paginas_pdf_por_regex']);
+});
+
+test('cliente http conserva o cabecalho de paginas para a geracao', async (t) => {
+  const { createServer } = require('node:http');
+  const { DocumentosHttp } = require('../dist/clientes');
+  const servidor = createServer((pedido, resposta) => {
+    pedido.resume();
+    assert.equal(pedido.headers['x-prdal-servico'], 'token-de-teste');
+    if (pedido.url.endsWith('pdf')) {
+      resposta.setHeader('X-Paginas', '1');
+      resposta.end(pdf(2));
+    } else resposta.end(Buffer.from('docx'));
+  });
+  await new Promise((resolve) => servidor.listen(0, '127.0.0.1', resolve));
+  t.after(() => servidor.close());
+  const documentos = new DocumentosHttp({ DOC_SERVICE_URL: `http://127.0.0.1:${servidor.address().port}`, SERVICE_TOKEN: 'token-de-teste' });
+  const { servico } = executor(banco(), { documentos });
+  const resultado = await servico.executar(job());
+  assert.equal(resultado.paginas, 1);
+});
