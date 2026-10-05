@@ -1,4 +1,4 @@
-import { GetObjectCommand, HeadBucketCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { DeleteObjectsCommand, GetObjectCommand, HeadBucketCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import type { PrismaClient } from '@prisma/client';
 import { cabecalhoRequestId } from './contexto';
 
@@ -324,6 +324,7 @@ export class DocumentosHttp implements Documentos {
 export interface Armazenamento {
   gravar(chave: string, dados: Buffer, tipo: string): Promise<string>;
   ler(chave: string): Promise<Buffer>;
+  apagarPrefixo(prefixo: string): Promise<void>;
   verificar(): Promise<void>;
 }
 
@@ -355,6 +356,21 @@ export class ArmazenamentoS3 implements Armazenamento {
     const { cliente, bucket } = this.conectar();
     const resposta = await cliente.send(new GetObjectCommand({ Bucket: bucket, Key: chave }));
     return Buffer.from(await resposta.Body!.transformToByteArray());
+  }
+
+  async apagarPrefixo(prefixo: string): Promise<void> {
+    const { cliente, bucket } = this.conectar();
+    let continuacao: string | undefined;
+    do {
+      const resposta = await cliente.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefixo, ContinuationToken: continuacao }));
+      const chaves = (resposta.Contents ?? []).flatMap((objeto) => objeto.Key ? [{ Key: objeto.Key }] : []);
+      if (chaves.length) {
+        const exclusao = await cliente.send(new DeleteObjectsCommand({ Bucket: bucket, Delete: { Objects: chaves, Quiet: true } }));
+        if (exclusao.Errors?.length) throw new Error(`falha ao apagar ${exclusao.Errors.length} arquivo(s) da conta`);
+      }
+      continuacao = resposta.IsTruncated ? resposta.NextContinuationToken : undefined;
+      if (resposta.IsTruncated && !continuacao) throw new Error('listagem S3 incompleta sem token de continuacao');
+    } while (continuacao);
   }
 
   async verificar(): Promise<void> {

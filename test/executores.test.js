@@ -142,7 +142,7 @@ test('empacotamento le os arquivos do s3, grava o zip e so referencia se o curri
 
 test('todo tipo de job tem executor', () => {
   const executores = montarExecutores({ prisma: {}, ia: {}, documentos: {}, armazenamento: new ArmazenamentoMemoria() });
-  assert.deepEqual(Object.keys(executores).sort(), ['empacotar_curriculo', 'extrair_keywords', 'gerar_curriculo', 'importar_lote', 'reindexar_contexto']);
+  assert.deepEqual(Object.keys(executores).sort(), ['empacotar_curriculo', 'excluir_conta', 'exportar_dados', 'extrair_keywords', 'gerar_curriculo', 'importar_lote', 'reindexar_contexto']);
 });
 
 test('narracao em duas mensagens, sem marcador nem travessao', () => {

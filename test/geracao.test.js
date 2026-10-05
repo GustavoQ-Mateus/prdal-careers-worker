@@ -42,12 +42,24 @@ function banco({ status = 'PENDENTE' } = {}) {
   };
   const prisma = {
     estado,
+    usuario: { findUnique: async () => ({ consentimentoLlmEm: new Date() }) },
     geracaoCurriculo: { findUnique: async () => ({ ...estado.geracao }), update: atualizarGeracao },
     curriculo: { count: async () => 0, findUnique: async () => estado.curriculo },
     $transaction: async (fn) => fn(tx),
   };
   return prisma;
 }
+
+test('geracao sem consentimento falha antes de consultar contexto ou chamar IA', async () => {
+  const prisma = banco();
+  prisma.usuario.findUnique = async () => ({ consentimentoLlmEm: null });
+  const { servico } = executor(prisma, {
+    rag: { recuperar: async () => { throw new Error('contexto nao deveria ser lido'); } },
+    ia: { gerarCurriculo: async () => { throw new Error('IA nao deveria ser chamada'); } },
+  });
+  await assert.rejects(servico.executar(job()), /consentimento.*ausente ou revogado/);
+  assert.equal(prisma.estado.atualizacoes.length, 0);
+});
 
 function pdf(paginas) {
   return Buffer.from(Array.from({ length: paginas }, () => '/Type /Page\n').join(''));

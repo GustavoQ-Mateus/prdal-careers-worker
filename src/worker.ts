@@ -1,7 +1,7 @@
 import type { TipoJob } from '@prisma/client';
 import { comRequestId } from './contexto';
 import { Fila, lerMensagem, MensagemRecebida } from './fila';
-import { JobEmCurso, RepositorioJobs } from './jobs';
+import { ErroDefinitivo, JobEmCurso, RepositorioJobs } from './jobs';
 import { Escritor, Logger } from './logger';
 
 export interface Executor {
@@ -113,11 +113,12 @@ export class Worker {
     if (this.varrendo || this.parando) return 0;
     this.varrendo = true;
     try {
+      const exclusoes = await this.jobs.criarExclusoesVencidas(LIMITE_VARREDURA);
       const esgotados = await this.jobs.orfaosEsgotados(this.opcoes.maxTentativas, this.opcoes.reenvioS, ERRO_ORFAO);
       for (const job of esgotados) await this.esgotar(job, ERRO_ORFAO);
       const pendentes = await this.jobs.paraReenviar(this.opcoes.pendenteAntigoS, this.opcoes.reenvioS, LIMITE_VARREDURA);
       let enviados = 0;
-      for (const job of pendentes) {
+      for (const job of [...exclusoes, ...pendentes]) {
         try {
           await this.fila.enviar({ jobId: job.id, tipo: job.tipo });
           enviados += 1;
@@ -125,8 +126,8 @@ export class Worker {
           this.logger.warn('varredura nao reenfileirou o job', { jobId: job.id, erro: mensagemDeErro(err) });
         }
       }
-      if (pendentes.length || esgotados.length) {
-        this.logger.log('varredura de jobs', { reenfileirados: enviados, encerrados: esgotados.length });
+      if (pendentes.length || exclusoes.length || esgotados.length) {
+        this.logger.log('varredura de jobs', { reenfileirados: enviados, exclusoes: exclusoes.length, encerrados: esgotados.length });
       }
       return enviados;
     } catch (err) {
@@ -202,13 +203,21 @@ export class Worker {
       const resultado = await executor.executar(job);
       clearInterval(batida);
       if (atual.devolvido) return;
-      await this.jobs.concluir(job.id, this.opcoes.id, resultado ?? null);
+      const concluido = await this.jobs.concluir(job.id, this.opcoes.id, resultado ?? null);
+      if (!concluido && job.tipo !== 'excluir_conta') throw new Error('lease perdido antes de concluir o job');
       await this.fila.apagar(recibo);
       this.logger.log('job concluido', { jobId: job.id, tipo: job.tipo, tentativa: job.tentativas, duracaoMs: Date.now() - inicio });
     } catch (err) {
       clearInterval(batida);
       if (atual.devolvido) return;
       const erro = mensagemDeErro(err);
+      if (err instanceof ErroDefinitivo) {
+        await this.jobs.falharDefinitivo(job.id, this.opcoes.id, erro);
+        await this.esgotar(job, erro);
+        await this.fila.apagar(recibo);
+        this.logger.warn('job encerrado sem nova tentativa', { jobId: job.id, tipo: job.tipo, erro });
+        return;
+      }
       if (job.tentativas >= this.opcoes.maxTentativas) {
         await this.jobs.falharDefinitivo(job.id, this.opcoes.id, erro);
         await this.fila.mudarVisibilidade(recibo, 0).catch(() => undefined);

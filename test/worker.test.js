@@ -6,6 +6,7 @@ const { Worker, esperaDaTentativa } = require('../dist/worker');
 const { requestIdAtual } = require('../dist/contexto');
 const { FilaMemoria } = require('./helpers/fila-memoria');
 const { JobsMemoria } = require('./helpers/jobs-memoria');
+const { ErroDefinitivo } = require('../dist/jobs');
 
 function opcoes(extra = {}) {
   return {
@@ -140,6 +141,41 @@ test('varredura reenfileira o job pendente que nunca chegou a fila', async () =>
   const worker = new Worker(fila, jobs, {}, opcoes());
   assert.equal(await worker.varrer(), 1);
   assert.deepEqual(JSON.parse(fila.mensagens[0].corpo), { jobId: 'j1', tipo: 'importar_lote' });
+});
+
+test('exclusao da conta remove o proprio job e confirma a mensagem sem DLQ', async () => {
+  const fila = new FilaMemoria();
+  const jobs = new JobsMemoria();
+  jobs.criar({ id: 'j1', tipo: 'excluir_conta' });
+  await fila.enviar({ jobId: 'j1', tipo: 'excluir_conta' });
+  const worker = new Worker(fila, jobs, {
+    excluir_conta: { executar: async () => { jobs.jobs.delete('j1'); return { excluido: true }; } },
+  }, opcoes());
+  worker.iniciar();
+  await ate(() => fila.mensagens.length === 0);
+  await worker.parar(100);
+  assert.equal(jobs.jobs.has('j1'), false);
+  assert.equal(fila.apagadas, 1);
+});
+
+test('falta de consentimento encerra geracao em erro sem nova tentativa', async () => {
+  const fila = new FilaMemoria();
+  const jobs = new JobsMemoria();
+  jobs.criar({ id: 'j1', tipo: 'gerar_curriculo' });
+  await fila.enviar({ jobId: 'j1', tipo: 'gerar_curriculo' });
+  const erros = [];
+  const worker = new Worker(fila, jobs, {
+    gerar_curriculo: {
+      executar: async () => { throw new ErroDefinitivo('consentimento ausente'); },
+      aoEsgotar: async (_job, erro) => erros.push(erro),
+    },
+  }, opcoes());
+  worker.iniciar();
+  await ate(() => jobs.jobs.get('j1').status === 'ERRO');
+  await worker.parar(100);
+  assert.equal(jobs.jobs.get('j1').tentativas, 1);
+  assert.deepEqual(erros, ['consentimento ausente']);
+  assert.equal(fila.mensagens.length, 0);
 });
 
 test('mensagem invalida ou de job inexistente e descartada', async () => {
