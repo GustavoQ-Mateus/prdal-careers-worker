@@ -197,7 +197,7 @@ export class CotaTokens {
 }
 
 export interface Ia {
-  gerarCurriculo(payload: unknown, usuarioId: string, operacao: string): Promise<ResultadoGeracao>;
+  gerarCurriculo?(payload: unknown, usuarioId: string, operacao: string): Promise<ResultadoGeracao>;
   reduzirCurriculo(payload: unknown, operacao: string): Promise<ResultadoGeracao>;
   keywords(descricao: string, usuarioId: string): Promise<ExtracaoKeywords>;
   classificar(titulo: string, descricao: string): Promise<{ categoria: string; nivel: string }>;
@@ -208,7 +208,6 @@ export interface Ia {
 
 export class IaHttp implements Ia {
   private readonly base: string;
-  private readonly geracaoMs: number;
   private readonly llmMs: number;
 
   constructor(
@@ -216,7 +215,6 @@ export class IaHttp implements Ia {
     private readonly env: Env = process.env,
   ) {
     this.base = env.AI_SERVICE_URL ?? 'http://localhost:8000';
-    this.geracaoMs = ms(env, 'AI_GENERATE_TIMEOUT_MS', 300_000);
     this.llmMs = ms(env, 'AI_LLM_TIMEOUT_MS', 60_000);
   }
 
@@ -238,16 +236,6 @@ export class IaHttp implements Ia {
       if (uso) await this.cota.registrar(usuarioId, uso).catch(() => undefined);
       throw err;
     }
-  }
-
-  gerarCurriculo(payload: unknown, usuarioId: string, operacao: string): Promise<ResultadoGeracao> {
-    return this.comCota(usuarioId, async () =>
-      (await postar('ai-service', `${this.base}/generate-cv-pipeline`, payload, {
-        env: this.env,
-        timeoutMs: this.geracaoMs,
-        cabecalhos: this.prazo(this.geracaoMs, operacao),
-      })) as ResultadoGeracao,
-    );
   }
 
   async reduzirCurriculo(payload: unknown, operacao: string): Promise<ResultadoGeracao> {
