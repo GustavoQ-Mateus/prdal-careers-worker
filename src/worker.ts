@@ -23,6 +23,7 @@ export interface OpcoesWorker {
   esperaAposErroMs?: number;
   visibilidadeInicialS?: number;
   escritor?: Escritor;
+  lembretes?: { executar(limite?: number): Promise<number> };
 }
 
 interface EmCurso {
@@ -114,6 +115,11 @@ export class Worker {
     this.varrendo = true;
     try {
       const exclusoes = await this.jobs.criarExclusoesVencidas(LIMITE_VARREDURA);
+      try {
+        await this.opcoes.lembretes?.executar(LIMITE_VARREDURA);
+      } catch (erro) {
+        this.logger.warn('varredura de lembretes falhou', { erro: mensagemDeErro(erro) });
+      }
       const esgotados = await this.jobs.orfaosEsgotados(this.opcoes.maxTentativas, this.opcoes.reenvioS, ERRO_ORFAO);
       for (const job of esgotados) await this.esgotar(job, ERRO_ORFAO);
       const pendentes = await this.jobs.paraReenviar(this.opcoes.pendenteAntigoS, this.opcoes.reenvioS, LIMITE_VARREDURA);
