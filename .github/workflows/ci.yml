@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verificar:
+    runs-on: ubuntu-latest
+    outputs:
+      imagem: ${{ steps.contexto.outputs.proprio }}
+    env:
+      DATABASE_URL: postgresql://teste:teste@localhost:5432/prdal_ci
+      PRDAL_TESTE_POSTGRES_URL: postgresql://teste:teste@localhost:5432/prdal_ci
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: teste
+          POSTGRES_PASSWORD: teste
+          POSTGRES_DB: prdal_ci
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U teste -d prdal_ci"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Instalar dependencias
+        run: npm ci --workspaces=false
+      - name: Verificar texto
+        run: node scripts/verificar-texto.cjs
+      - name: Compilar
+        run: npm run build
+      - name: Preparar banco descartavel
+        run: npx prisma db push --schema prisma/schema.prisma
+      - name: Testar
+        run: npm test
+      - name: Conferir contexto proprio
+        id: contexto
+        run: |
+          if [ -f .contexto-proprio ]; then
+            echo "proprio=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Construir imagem
+        if: steps.contexto.outputs.proprio == 'true'
+        run: docker build -t unidade:${{ github.sha }} .
+      - name: Verificar vulnerabilidades
+        if: steps.contexto.outputs.proprio == 'true'
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          image-ref: unidade:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+      - name: Salvar imagem verificada
+        if: steps.contexto.outputs.proprio == 'true'
+        run: docker save unidade:${{ github.sha }} -o "${{ runner.temp }}/imagem.tar"
+      - uses: actions/upload-artifact@v4
+        if: steps.contexto.outputs.proprio == 'true'
+        with:
+          name: imagem
+          path: ${{ runner.temp }}/imagem.tar
+          retention-days: 1
