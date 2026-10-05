@@ -41,7 +41,9 @@ jobs:
       - name: Compilar
         run: npm run build
       - name: Preparar banco descartavel
-        run: npx prisma db push --schema prisma/schema.prisma
+        run: |
+          printf 'CREATE EXTENSION IF NOT EXISTS vector;' | npx prisma db execute --stdin --schema prisma/schema.prisma
+          npx prisma db push --schema prisma/schema.prisma
       - name: Testar
         run: npm test
       - name: Conferir contexto proprio
