@@ -7,6 +7,7 @@ import { montarExecutores } from './executores';
 import { FilaSqs } from './fila';
 import { RepositorioJobsPostgres } from './jobs';
 import { Logger } from './logger';
+import { EnviadorHttp, VarreduraLembretes } from './lembretes';
 import { servidorSaude } from './saude';
 import { Worker } from './worker';
 
@@ -27,6 +28,7 @@ async function iniciar() {
     varreduraIntervaloMs: config.varreduraIntervaloMs,
     pendenteAntigoS: config.pendenteAntigoS,
     reenvioS: config.reenvioS,
+    lembretes: process.env.AGENDADOR_MODO === 'eventbridge' ? undefined : new VarreduraLembretes(prisma, new EnviadorHttp()),
   });
   const servidor = servidorSaude(
     [
