@@ -10,6 +10,7 @@ export interface ConfiguracaoWorker {
   concorrencia: number;
   leaseS: number;
   esperaS: number;
+  visibilidadeInicialS: number;
   maxTentativas: number;
   prazoDesligamentoMs: number;
   varreduraIntervaloMs: number;
@@ -24,6 +25,7 @@ export function configuracao(env: Env = process.env): ConfiguracaoWorker {
     concorrencia: inteiro(env, 'WORKER_CONCORRENCIA', 2),
     leaseS: inteiro(env, 'WORKER_LEASE_S', 60, 5),
     esperaS: Math.min(inteiro(env, 'WORKER_ESPERA_S', 20, 0), 20),
+    visibilidadeInicialS: inteiro(env, 'WORKER_VISIBILIDADE_INICIAL_S', 15),
     maxTentativas: inteiro(env, 'WORKER_MAX_TENTATIVAS', 3),
     prazoDesligamentoMs: inteiro(env, 'DESLIGAMENTO_PRAZO_MS', 25_000),
     varreduraIntervaloMs: inteiro(env, 'VARREDURA_INTERVALO_MS', 30_000),

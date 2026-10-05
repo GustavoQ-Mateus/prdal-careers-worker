@@ -67,6 +67,10 @@ class JobsMemoria {
     return [];
   }
 
+  async estado(id) {
+    return this.jobs.get(id)?.status ?? null;
+  }
+
   async verificar() {}
 }
 

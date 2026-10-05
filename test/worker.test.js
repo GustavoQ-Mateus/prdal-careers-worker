@@ -167,3 +167,41 @@ test('o worker nao importa codigo da api nem de outra unidade', () => {
     assert.doesNotMatch(texto, /apps\/(api|jobs|lambdas)/, String(arquivo));
   }
 });
+
+test('recebimentos perdidos num poll abortado nao mandam para a fila de mortas um job que ainda tem tentativas', async () => {
+  const fila = new FilaMemoria({ maxRecebimentos: 3 });
+  const jobs = new JobsMemoria();
+  jobs.criar({ id: 'j1', tipo: 'extrair_keywords' });
+  await fila.enviar({ jobId: 'j1', tipo: 'extrair_keywords' });
+  fila.mensagens[0].recebimentos = 2;
+  const tentativas = [];
+  const esgotados = [];
+  const worker = new Worker(fila, jobs, {
+    extrair_keywords: {
+      executar: async (job) => { tentativas.push(job.tentativas); throw new Error('sem Claude'); },
+      aoEsgotar: async (job) => esgotados.push(job.id),
+    },
+  }, opcoes());
+  worker.iniciar();
+  await ate(() => jobs.jobs.get('j1').status === 'ERRO');
+  await ate(() => fila.mortas.length === 1);
+  await worker.parar(100);
+  assert.deepEqual(tentativas, [1, 2, 3]);
+  assert.deepEqual(esgotados, ['j1']);
+  assert.equal(fila.mensagens.length, 0);
+});
+
+test('duplicata de job concluido e apagada; de job em erro segue para a fila de mortas', async () => {
+  const fila = new FilaMemoria({ maxRecebimentos: 3 });
+  const jobs = new JobsMemoria();
+  jobs.criar({ id: 'ok', tipo: 'gerar_curriculo', status: 'CONCLUIDO' });
+  jobs.criar({ id: 'falhou', tipo: 'gerar_curriculo', status: 'ERRO' });
+  await fila.enviar({ jobId: 'ok', tipo: 'gerar_curriculo' });
+  await fila.enviar({ jobId: 'falhou', tipo: 'gerar_curriculo' });
+  const worker = new Worker(fila, jobs, {}, opcoes());
+  worker.iniciar();
+  await ate(() => fila.mensagens.length === 0);
+  await worker.parar(100);
+  assert.equal(fila.apagadas, 1);
+  assert.deepEqual(fila.mortas.map((m) => JSON.parse(m.corpo).jobId), ['falhou']);
+});

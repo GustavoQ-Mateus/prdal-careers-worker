@@ -27,6 +27,7 @@ export interface RepositorioJobs {
   devolver(id: string, worker: string): Promise<boolean>;
   paraReenviar(pendenteAntigoS: number, reenvioS: number, limite: number): Promise<JobParaReenviar[]>;
   orfaosEsgotados(maxTentativas: number, reenvioS: number, erro: string): Promise<JobOrfaoEsgotado[]>;
+  estado(id: string): Promise<StatusJob | null>;
   verificar(): Promise<void>;
 }
 
@@ -128,6 +129,11 @@ export class RepositorioJobsPostgres implements RepositorioJobs {
           FOR UPDATE SKIP LOCKED)
    RETURNING id, tipo, status, tentativas, usuario_id AS "usuarioId", referencia_id AS "referenciaId",
              request_id AS "requestId", entrada`;
+  }
+
+  async estado(id: string): Promise<StatusJob | null> {
+    const job = await this.prisma.job.findUnique({ where: { id }, select: { status: true } });
+    return job?.status ?? null;
   }
 
   async verificar(): Promise<void> {

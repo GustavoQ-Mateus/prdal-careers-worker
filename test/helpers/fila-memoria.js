@@ -7,11 +7,12 @@ class FilaMemoria {
     this.sequencia = 0;
   }
 
-  async enviar(mensagem) {
-    this.mensagens.push({ id: ++this.sequencia, corpo: JSON.stringify(mensagem), recebimentos: 0, visivelEm: 0, recibo: null });
+  async enviar(mensagem, atrasoS = 0) {
+    this.enviadas = (this.enviadas ?? 0) + 1;
+    this.mensagens.push({ id: ++this.sequencia, corpo: JSON.stringify(mensagem), recebimentos: 0, visivelEm: atrasoS ? Date.now() + 1 : 0, recibo: null });
   }
 
-  async receber(esperaS, sinal) {
+  async receber(esperaS, _visibilidadeS, sinal) {
     const limite = Date.now() + Math.min(esperaS, 0.05) * 1000;
     for (;;) {
       if (sinal?.aborted) return [];
@@ -43,7 +44,7 @@ class FilaMemoria {
 
   async mudarVisibilidade(recibo, segundos) {
     const m = this.mensagens.find((x) => x.recibo === recibo);
-    if (m) m.visivelEm = Date.now() + (segundos === 0 ? 0 : 1);
+    if (m) m.visivelEm = Date.now() + segundos;
   }
 
   async verificar() {}

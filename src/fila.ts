@@ -20,8 +20,8 @@ export interface MensagemRecebida {
 }
 
 export interface Fila {
-  enviar(mensagem: MensagemJob): Promise<void>;
-  receber(esperaS: number, sinal?: AbortSignal): Promise<MensagemRecebida[]>;
+  enviar(mensagem: MensagemJob, atrasoS?: number): Promise<void>;
+  receber(esperaS: number, visibilidadeS: number, sinal?: AbortSignal): Promise<MensagemRecebida[]>;
   apagar(recibo: string): Promise<void>;
   mudarVisibilidade(recibo: string, segundos: number): Promise<void>;
   verificar(): Promise<void>;
@@ -53,16 +53,23 @@ export class FilaSqs implements Fila {
     this.cliente = new SQSClient({ region: regiao, ...(endpoint ? { endpoint } : {}) });
   }
 
-  async enviar(mensagem: MensagemJob): Promise<void> {
-    await this.cliente.send(new SendMessageCommand({ QueueUrl: this.url, MessageBody: JSON.stringify({ jobId: mensagem.jobId, tipo: mensagem.tipo }) }));
+  async enviar(mensagem: MensagemJob, atrasoS = 0): Promise<void> {
+    await this.cliente.send(
+      new SendMessageCommand({
+        QueueUrl: this.url,
+        MessageBody: JSON.stringify({ jobId: mensagem.jobId, tipo: mensagem.tipo }),
+        ...(atrasoS > 0 ? { DelaySeconds: Math.min(atrasoS, 900) } : {}),
+      }),
+    );
   }
 
-  async receber(esperaS: number, sinal?: AbortSignal): Promise<MensagemRecebida[]> {
+  async receber(esperaS: number, visibilidadeS: number, sinal?: AbortSignal): Promise<MensagemRecebida[]> {
     const resposta = await this.cliente.send(
       new ReceiveMessageCommand({
         QueueUrl: this.url,
         MaxNumberOfMessages: 1,
         WaitTimeSeconds: esperaS,
+        VisibilityTimeout: visibilidadeS,
         MessageSystemAttributeNames: ['ApproximateReceiveCount'],
       }),
       { abortSignal: sinal },

@@ -21,18 +21,21 @@ export interface OpcoesWorker {
   pendenteAntigoS: number;
   reenvioS: number;
   esperaAposErroMs?: number;
+  visibilidadeInicialS?: number;
   escritor?: Escritor;
 }
 
 interface EmCurso {
   job: JobEmCurso;
   recibo: string;
+  recebimentos: number;
   promessa: Promise<void>;
   devolvido: boolean;
   batida?: NodeJS.Timeout;
 }
 
 const LIMITE_VARREDURA = 50;
+const VISIBILIDADE_INICIAL_S = 15;
 const ERRO_ORFAO = 'o job parou de responder em todas as tentativas e foi encerrado';
 
 export function esperaDaTentativa(tentativas: number): number {
@@ -98,7 +101,7 @@ export class Worker {
       atual.devolvido = true;
       if (atual.batida) clearInterval(atual.batida);
       const devolvido = await this.jobs.devolver(atual.job.id, this.opcoes.id).catch(() => false);
-      await this.fila.mudarVisibilidade(atual.recibo, 0).catch(() => undefined);
+      await this.devolverMensagem(atual, 0).catch(() => undefined);
       if (devolvido) devolvidos += 1;
       this.logger.warn('lease devolvido no desligamento', { jobId: atual.job.id, tipo: atual.job.tipo, requestId: atual.job.requestId ?? undefined });
     }
@@ -138,7 +141,7 @@ export class Worker {
     while (!this.parando) {
       let mensagens: MensagemRecebida[] = [];
       try {
-        mensagens = await this.fila.receber(this.opcoes.esperaS, this.parada.signal);
+        mensagens = await this.fila.receber(this.opcoes.esperaS, this.opcoes.visibilidadeInicialS ?? VISIBILIDADE_INICIAL_S, this.parada.signal);
       } catch (err) {
         if (this.parando) break;
         this.logger.warn('falha ao receber da fila', { erro: mensagemDeErro(err) });
@@ -164,11 +167,19 @@ export class Worker {
     }
     const job = await this.jobs.obterLease(corpo.jobId, this.opcoes.id, this.opcoes.leaseS);
     if (!job) {
+      if ((await this.jobs.estado(corpo.jobId)) === 'ERRO') {
+        await this.fila.mudarVisibilidade(mensagem.recibo, 0);
+        this.logger.log('mensagem de job em erro devolvida para seguir para a fila de mensagens mortas', { jobId: corpo.jobId, recebimentos: mensagem.recebimentos });
+        return;
+      }
       this.logger.log('mensagem sem lease descartada', { jobId: corpo.jobId, tipo: corpo.tipo, recebimentos: mensagem.recebimentos });
       await this.fila.apagar(mensagem.recibo);
       return;
     }
-    const atual: EmCurso = { job, recibo: mensagem.recibo, devolvido: false, promessa: Promise.resolve() };
+    await this.fila.mudarVisibilidade(mensagem.recibo, this.opcoes.leaseS).catch((err) =>
+      this.logger.warn('visibilidade da mensagem nao estendida; o lease segue valendo', { jobId: job.id, erro: mensagemDeErro(err) }),
+    );
+    const atual: EmCurso = { job, recibo: mensagem.recibo, recebimentos: mensagem.recebimentos, devolvido: false, promessa: Promise.resolve() };
     atual.promessa = comRequestId(job.requestId ?? job.id, () => this.executar(atual, mensagem.recebimentos));
     this.emCurso.set(job.id, atual);
     try {
@@ -212,9 +223,25 @@ export class Worker {
       }
       await this.jobs.liberarComErro(job.id, this.opcoes.id, erro);
       const espera = esperaDaTentativa(job.tentativas);
-      await this.fila.mudarVisibilidade(recibo, espera).catch(() => undefined);
+      await this.devolverMensagem(atual, espera).catch((falha) =>
+        this.logger.warn('mensagem nao devolvida a fila; a varredura reenfileira o job', { jobId: job.id, erro: mensagemDeErro(falha) }),
+      );
       this.logger.warn('job falhou; nova tentativa depois da espera', { jobId: job.id, tipo: job.tipo, tentativa: job.tentativas, esperaS: espera, erro });
     }
+  }
+
+  private async devolverMensagem(atual: EmCurso, esperaS: number): Promise<void> {
+    if (atual.recebimentos < this.opcoes.maxTentativas) {
+      await this.fila.mudarVisibilidade(atual.recibo, esperaS);
+      return;
+    }
+    await this.fila.enviar({ jobId: atual.job.id, tipo: atual.job.tipo }, esperaS);
+    await this.fila.apagar(atual.recibo);
+    this.logger.log('mensagem trocada por uma nova: a fila ja contou todos os recebimentos, mas o job ainda tem tentativas', {
+      jobId: atual.job.id,
+      tentativa: atual.job.tentativas,
+      recebimentos: atual.recebimentos,
+    });
   }
 
   private async esgotar(job: JobEmCurso, erro: string): Promise<void> {

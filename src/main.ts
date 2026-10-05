@@ -22,6 +22,7 @@ async function iniciar() {
     concorrencia: config.concorrencia,
     leaseS: config.leaseS,
     esperaS: config.esperaS,
+    visibilidadeInicialS: config.visibilidadeInicialS,
     maxTentativas: config.maxTentativas,
     varreduraIntervaloMs: config.varreduraIntervaloMs,
     pendenteAntigoS: config.pendenteAntigoS,
