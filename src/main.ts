@@ -1,6 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { hostname } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { ArmazenamentoS3 } from './clientes';
 import { configuracao } from './config';
 import { montarExecutores } from './executores';
 import { FilaSqs } from './fila';
@@ -15,7 +16,8 @@ async function iniciar() {
   const prisma = new PrismaClient();
   const fila = new FilaSqs();
   const jobs = new RepositorioJobsPostgres(prisma);
-  const worker = new Worker(fila, jobs, montarExecutores({ prisma }), {
+  const armazenamento = new ArmazenamentoS3();
+  const worker = new Worker(fila, jobs, montarExecutores({ prisma, armazenamento }), {
     id: `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`,
     concorrencia: config.concorrencia,
     leaseS: config.leaseS,
@@ -29,6 +31,7 @@ async function iniciar() {
     [
       { nome: 'postgres', verificar: () => jobs.verificar() },
       { nome: 'fila', verificar: () => fila.verificar() },
+      { nome: 'armazenamento', verificar: () => armazenamento.verificar() },
     ],
     config.prontidaoMs,
     () => worker.parando,
