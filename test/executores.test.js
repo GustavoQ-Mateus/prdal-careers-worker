@@ -58,7 +58,7 @@ test('descricao editada durante a extracao descarta o resultado antigo', async (
 
 function bancoLote(itens, extras = {}) {
   const lote = { id: 'l1', usuarioId: 'u1', status: 'PENDENTE', processados: 0 };
-  const porId = new Map(itens.map((i) => [i.id, { loteId: 'l1', status: 'PENDENTE', tentativas: 0, erro: null, bancoVagaId: null, documentoRagId: null, referenciaLegada: null, ...i }]));
+  const porId = new Map(itens.map((i) => [i.id, { loteId: 'l1', status: 'PENDENTE', tentativas: 0, erro: null, vagaId: null, documentoRagId: null, referenciaLegada: null, ...i }]));
   const prisma = {
     lote,
     itens: porId,
@@ -82,27 +82,30 @@ function bancoLote(itens, extras = {}) {
   return prisma;
 }
 
-test('importacao em leque: cada item conclui ou falha sozinho e o lote fecha quando nao sobra item aberto', async () => {
-  const docs = { b1: { id: 'b1', titulo: 'Dev', descricao: 'Java' }, b2: { id: 'b2', titulo: 'QA', descricao: 'sem termos' } };
+test('importacao em leque: cada item classifica a entrada e o lote fecha quando nao sobra item aberto', async () => {
+  const vagas = { v1: { id: 'v1', titulo: 'Dev', descricao: 'Java', estagio: 'ENTRADA' }, v2: { id: 'v2', titulo: 'QA', descricao: 'Testes', estagio: 'ATIVA' } };
   const atualizadas = {};
-  const prisma = bancoLote([{ id: 'i1', bancoVagaId: 'b1' }, { id: 'i2', bancoVagaId: 'b2' }], {
-    bancoVaga: { findUnique: async ({ where }) => docs[where.id] ?? null, update: async ({ where, data }) => { atualizadas[where.id] = data; } },
+  const prisma = bancoLote([{ id: 'i1', vagaId: 'v1' }, { id: 'i2', vagaId: 'v2' }], {
+    vaga: {
+      findUnique: async ({ where }) => vagas[where.id] ?? null,
+      updateMany: async ({ where, data }) => {
+        const v = vagas[where.id];
+        if (!v || v.estagio !== where.estagio) return { count: 0 };
+        atualizadas[where.id] = data;
+        Object.assign(v, data);
+        return { count: 1 };
+      },
+    },
   });
-  const ia = {
-    keywords: async (descricao) => (descricao === 'Java' ? { keywords: [{ termo: 'Java', peso: 1 }], status: 'VALIDAS', degradacao: null } : { keywords: [], status: 'PENDENTE', degradacao: null }),
-    classificar: async () => ({ categoria: 'backend', nivel: 'pleno' }),
-  };
+  const ia = { classificar: async (titulo) => (titulo === 'Dev' ? { categoria: 'backend', nivel: 'pleno' } : { categoria: 'qa', nivel: 'junior' }) };
   const executor = new ExecutorImportacao(prisma, ia);
-  assert.deepEqual(await executor.executar(job('importar_lote', 'i1')), { keywords: 1, categoria: 'backend', nivel: 'pleno' });
+  assert.deepEqual(await executor.executar(job('importar_lote', 'i1')), { categoria: 'backend', nivel: 'pleno' });
   assert.equal(prisma.itens.get('i1').status, 'CONCLUIDO');
-  assert.deepEqual(atualizadas.b1.keywordsStatus, 'VALIDAS');
+  assert.deepEqual(atualizadas.v1, { categoria: 'backend', nivel: 'pleno' });
   assert.equal(prisma.estadoLote.status, 'PROCESSANDO');
-  await assert.rejects(executor.executar(job('importar_lote', 'i2')), (err) => err.message === SEM_KEYWORDS);
-  assert.deepEqual([prisma.itens.get('i2').status, prisma.itens.get('i2').erro], ['PENDENTE', SEM_KEYWORDS]);
-  assert.equal(prisma.estadoLote.status, 'PROCESSANDO');
-  await executor.aoEsgotar(job('importar_lote', 'i2', { tentativas: 3 }), SEM_KEYWORDS);
-  assert.deepEqual([prisma.itens.get('i2').status, prisma.itens.get('i2').tentativas], ['ERRO', 3]);
-  assert.deepEqual([prisma.estadoLote.status, prisma.estadoLote.processados], ['CONCLUIDO', 1]);
+  assert.deepEqual(await executor.executar(job('importar_lote', 'i2')), { ignorado: 'oportunidade ja ativada' });
+  assert.equal(atualizadas.v2, undefined);
+  assert.deepEqual([prisma.estadoLote.status, prisma.estadoLote.processados], ['CONCLUIDO', 2]);
   assert.deepEqual(await executor.executar(job('importar_lote', 'i1')), { status: 'CONCLUIDO' });
 });
 

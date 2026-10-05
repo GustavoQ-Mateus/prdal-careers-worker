@@ -1,9 +1,8 @@
-import { Prisma, PrismaClient } from '@prisma/client';
+import { PrismaClient } from '@prisma/client';
 import type { Ia } from '../clientes';
 import type { JobEmCurso } from '../jobs';
 import type { Rag } from '../rag';
 import type { Executor } from '../worker';
-import { SEM_KEYWORDS } from './keywords';
 
 export const ITEM_SEM_REGISTRO = 'o registro deste item foi removido antes do processamento';
 
@@ -12,7 +11,7 @@ abstract class ExecutorItemDeLote implements Executor {
 
   protected abstract processar(referencia: string, usuarioId: string): Promise<unknown>;
 
-  protected abstract referencia(item: { bancoVagaId: string | null; documentoRagId: string | null; referenciaLegada: string | null }): string | null;
+  protected abstract referencia(item: { vagaId: string | null; documentoRagId: string | null; referenciaLegada: string | null }): string | null;
 
   async executar(job: JobEmCurso): Promise<unknown> {
     const item = await this.prisma.loteItem.findUnique({ where: { id: job.referenciaId }, include: { lote: { select: { id: true, usuarioId: true } } } });
@@ -57,21 +56,17 @@ export class ExecutorImportacao extends ExecutorItemDeLote {
     super(prisma);
   }
 
-  protected referencia(item: { bancoVagaId: string | null; referenciaLegada: string | null }): string | null {
-    return item.bancoVagaId ?? item.referenciaLegada;
+  protected referencia(item: { vagaId: string | null; referenciaLegada: string | null }): string | null {
+    return item.vagaId ?? item.referenciaLegada;
   }
 
-  protected async processar(bancoVagaId: string, usuarioId: string): Promise<unknown> {
-    const doc = await this.prisma.bancoVaga.findUnique({ where: { id: bancoVagaId } });
-    if (!doc) throw new Error('postagem nao encontrada no banco de vagas');
-    const extracao = await this.ia.keywords(doc.descricao, usuarioId);
-    if (extracao.status !== 'VALIDAS') throw new Error(extracao.degradacao ?? SEM_KEYWORDS);
-    const { categoria, nivel } = await this.ia.classificar(doc.titulo, doc.descricao);
-    await this.prisma.bancoVaga.update({
-      where: { id: bancoVagaId },
-      data: { keywords: extracao.keywords as unknown as Prisma.InputJsonValue, keywordsStatus: 'VALIDAS', categoria, nivel },
-    });
-    return { keywords: extracao.keywords.length, categoria, nivel };
+  protected async processar(vagaId: string): Promise<unknown> {
+    const vaga = await this.prisma.vaga.findUnique({ where: { id: vagaId } });
+    if (!vaga) throw new Error('oportunidade nao encontrada');
+    if (vaga.estagio !== 'ENTRADA') return { ignorado: 'oportunidade ja ativada' };
+    const { categoria, nivel } = await this.ia.classificar(vaga.titulo, vaga.descricao);
+    await this.prisma.vaga.updateMany({ where: { id: vagaId, estagio: 'ENTRADA' }, data: { categoria, nivel } });
+    return { categoria, nivel };
   }
 }
 
