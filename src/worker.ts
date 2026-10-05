@@ -1,7 +1,7 @@
 import type { TipoJob } from '@prisma/client';
 import { comRequestId } from './contexto';
 import { Fila, lerMensagem, MensagemRecebida } from './fila';
-import { JobEmCurso, RepositorioJobs } from './jobs';
+import { ErroDefinitivo, JobEmCurso, RepositorioJobs } from './jobs';
 import { Escritor, Logger } from './logger';
 
 export interface Executor {
@@ -209,6 +209,13 @@ export class Worker {
       clearInterval(batida);
       if (atual.devolvido) return;
       const erro = mensagemDeErro(err);
+      if (err instanceof ErroDefinitivo) {
+        await this.jobs.falharDefinitivo(job.id, this.opcoes.id, erro);
+        await this.esgotar(job, erro);
+        await this.fila.apagar(recibo);
+        this.logger.warn('job encerrado sem nova tentativa', { jobId: job.id, tipo: job.tipo, erro });
+        return;
+      }
       if (job.tentativas >= this.opcoes.maxTentativas) {
         await this.jobs.falharDefinitivo(job.id, this.opcoes.id, erro);
         await this.fila.mudarVisibilidade(recibo, 0).catch(() => undefined);

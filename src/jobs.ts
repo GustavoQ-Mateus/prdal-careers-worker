@@ -11,6 +11,8 @@ export interface JobEmCurso {
   entrada: Prisma.JsonValue | null;
 }
 
+export class ErroDefinitivo extends Error {}
+
 export interface JobParaReenviar {
   id: string;
   tipo: TipoJob;

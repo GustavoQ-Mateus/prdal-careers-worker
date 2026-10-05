@@ -12,7 +12,7 @@ import {
   registrarEvento,
   TIPOS_ARQUIVO,
 } from '../dominio';
-import type { JobEmCurso } from '../jobs';
+import { ErroDefinitivo, type JobEmCurso } from '../jobs';
 import { Logger } from '../logger';
 import type { Rag } from '../rag';
 import type { Executor } from '../worker';
@@ -22,6 +22,7 @@ export const DEGRADACAO_CONTEXTO =
 export const DEGRADACAO_RENDERIZACAO =
   'Os arquivos PDF e DOCX não puderam ser gerados agora. O texto do currículo está salvo e você pode gerar os arquivos novamente.';
 export const ENTRADA_AUSENTE = 'o pedido de geracao nao trouxe o perfil e a vaga; peca a geracao de novo';
+export const CONSENTIMENTO_REVOGADO = 'consentimento para envio de dados ao provedor de IA ausente ou revogado';
 
 export interface EntradaGeracao {
   perfilMestre: unknown;
@@ -69,6 +70,8 @@ export class ExecutorGeracao implements Executor {
     const geracao = await this.prisma.geracaoCurriculo.findUnique({ where: { id }, include: { vaga: true } });
     if (!geracao) return { ignorado: 'geracao removida' };
     if (geracao.status === 'CONCLUIDA' || geracao.status === 'ERRO') return { status: geracao.status, curriculoId: geracao.curriculoId };
+    const usuario = await this.prisma.usuario.findUnique({ where: { id: geracao.usuarioId }, select: { consentimentoLlmEm: true } });
+    if (!usuario?.consentimentoLlmEm) throw new ErroDefinitivo(CONSENTIMENTO_REVOGADO);
     const entrada = entradaValida(job.entrada);
     if (!entrada) throw new Error(ENTRADA_AUSENTE);
     const { perfilMestre, vaga, keywords } = entrada;
