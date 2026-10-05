@@ -2,6 +2,7 @@ import { Prisma, PrismaClient } from '@prisma/client';
 import type { Ia } from '../clientes';
 import type { JobEmCurso } from '../jobs';
 import type { Executor } from '../worker';
+import type { Executores } from '../porta-executores';
 
 export const SEM_KEYWORDS = 'a extracao de keywords nao retornou termos validos';
 
@@ -9,6 +10,7 @@ export class ExecutorKeywords implements Executor {
   constructor(
     private readonly prisma: PrismaClient,
     private readonly ia: Ia,
+    private readonly passos?: Executores,
   ) {}
 
   async executar(job: JobEmCurso): Promise<unknown> {
@@ -16,7 +18,11 @@ export class ExecutorKeywords implements Executor {
     if (!vaga) return { ignorado: 'oportunidade removida' };
     await this.prisma.vaga.update({ where: { id: vaga.id }, data: { keywordsExtracao: 'EXTRAINDO' } });
     try {
-      const extracao = await this.ia.keywords(vaga.descricao, vaga.usuarioId);
+      const extracao = this.passos
+        ? await this.passos.executar<{ keywords: { termo: string; peso: number }[]; status: 'VALIDAS' | 'PENDENTE'; degradacao: string | null }>(
+          'keywords', { descricao: vaga.descricao }, vaga.usuarioId, `keywords:${job.id}`,
+        )
+        : await this.ia.keywords(vaga.descricao, vaga.usuarioId);
       if (extracao.status !== 'VALIDAS') throw new Error(extracao.degradacao ?? SEM_KEYWORDS);
       const { count } = await this.prisma.vaga.updateMany({
         where: { id: vaga.id, descricao: vaga.descricao },

@@ -19,6 +19,7 @@ function banco({ status = 'PENDENTE' } = {}) {
     eventos: [],
     pipeline: { vagaId: 'v1', usuarioId: 'u1', estado: 'GERANDO', jobId: 'g1', curriculoId: null, perfilAlteradoNaGeracao: false, versao: 1 },
     eventosPipeline: [],
+    job: { resultado: null },
   };
   const atualizarGeracao = async ({ data }) => {
     estado.atualizacoes.push(data);
@@ -45,6 +46,10 @@ function banco({ status = 'PENDENTE' } = {}) {
     usuario: { findUnique: async () => ({ consentimentoLlmEm: new Date() }) },
     geracaoCurriculo: { findUnique: async () => ({ ...estado.geracao }), update: atualizarGeracao },
     curriculo: { count: async () => 0, findUnique: async () => estado.curriculo },
+    job: {
+      findUnique: async () => estado.job,
+      update: async ({ data }) => { Object.assign(estado.job, data); },
+    },
     $transaction: async (fn) => fn(tx),
   };
   return prisma;
@@ -65,7 +70,7 @@ function pdf(paginas) {
   return Buffer.from(Array.from({ length: paginas }, () => '/Type /Page\n').join(''));
 }
 
-function executor(prisma, { ia = {}, documentos, rag, armazenamento = new ArmazenamentoMemoria() } = {}) {
+function executor(prisma, { ia = {}, documentos, rag, armazenamento = new ArmazenamentoMemoria(), passos } = {}) {
   const docs = documentos ?? { renderPdf: async () => pdf(1), renderDocx: async () => Buffer.from('docx') };
   const servico = new ExecutorGeracao(
     prisma,
@@ -73,12 +78,52 @@ function executor(prisma, { ia = {}, documentos, rag, armazenamento = new Armaze
     docs,
     armazenamento,
     rag ?? { recuperar: async () => ({ chunks: [], degradacao: null }) },
+    passos,
   );
   servico.logger.warn = () => {};
   return { servico, armazenamento };
 }
 
 const job = (extra = {}) => ({ id: 'job-x', tipo: 'gerar_curriculo', tentativas: 1, usuarioId: 'u1', referenciaId: 'g1', requestId: 'req', entrada, ...extra });
+
+test('geracao em passos repara, respeita o teto e grava estado para retomada', async () => {
+  const prisma = banco();
+  const chamadas = [];
+  let falhar = true;
+  const passos = { executar: async (passo, payload) => {
+    chamadas.push([passo, payload]);
+    if (passo === 'rascunho') return { rascunho: { titulo: {} }, promptVersion: 'reescrita.v4', modelo: 'simulado', uso: { chamadas: 1 } };
+    if (passo === 'verificar' && falhar) { falhar = false; throw new Error('timeout do passo'); }
+    if (passo === 'verificar' && !payload.estado) return { estado: { titulo: null }, rejeitadas: [{ chave: 'resumo.1' }], uso: { chamadas: 1 } };
+    if (passo === 'reparar') return { reparos: [{ chave: 'resumo.1', texto: 'Aceita', fontes: ['resumo'] }], uso: { chamadas: 1 } };
+    if (passo === 'verificar') return { estado: { titulo: { texto: 'Aceita' } }, rejeitadas: [], uso: { chamadas: 1 } };
+    return { markdown: '# Pessoa', estrutura, analiseInicial: analise, analiseFinal: analise, degradacao: null };
+  } };
+  const { servico } = executor(prisma, { passos });
+  await assert.rejects(servico.executar(job()), /timeout do passo/);
+  assert.equal(prisma.estado.job.resultado.passos.rascunho.modelo, 'simulado');
+  await servico.executar(job({ tentativas: 2 }));
+  assert.deepEqual(chamadas.map(([passo]) => passo), ['rascunho', 'verificar', 'verificar', 'reparar', 'verificar', 'montar']);
+  assert.equal(chamadas[4][1].chamadasRestantes, 3);
+  const status = prisma.estado.atualizacoes.map((item) => item.status).filter(Boolean);
+  assert.ok(status.some((item, indice) => item === 'VALIDANDO' && status[indice + 1] === 'GERANDO' && status[indice + 2] === 'VALIDANDO'));
+  assert.equal(prisma.estado.curriculo.modelo, 'simulado');
+});
+
+test('teto esgotado monta so com frases aceitas sem chamar reparo', async () => {
+  const prisma = banco();
+  const chamadas = [];
+  const passos = { executar: async (passo, payload) => {
+    chamadas.push([passo, payload]);
+    if (passo === 'rascunho') return { rascunho: {}, promptVersion: 'reescrita.v4', uso: { chamadas: 5 } };
+    if (passo === 'verificar') return { estado: {}, rejeitadas: [{ chave: 'resumo.1' }], uso: { chamadas: 1 } };
+    if (passo === 'montar') return { markdown: '# Pessoa', estrutura, analiseInicial: analise, analiseFinal: analise, degradacao: null };
+    throw new Error('reparo excedeu teto');
+  } };
+  await executor(prisma, { passos }).servico.executar(job());
+  assert.deepEqual(chamadas.map(([passo]) => passo), ['rascunho', 'verificar', 'montar']);
+  assert.equal(chamadas[1][1].chamadasRestantes, 1);
+});
 
 test('o rag e consultado pelas keywords da vaga por peso, e as fontes seguem tipadas ate a geracao', async () => {
   const consultas = [];

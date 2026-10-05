@@ -1,5 +1,5 @@
 import { Prisma, PrismaClient } from '@prisma/client';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Armazenamento, AtsAnalysis, Documentos, FonteContexto, Ia, Keyword } from '../clientes';
 import {
   aplicarNoPipeline,
@@ -16,6 +16,7 @@ import { ErroDefinitivo, type JobEmCurso } from '../jobs';
 import { Logger } from '../logger';
 import type { Rag } from '../rag';
 import type { Executor } from '../worker';
+import type { Executores } from '../porta-executores';
 
 export const DEGRADACAO_CONTEXTO =
   'O histórico de notas e candidaturas não pôde ser consultado agora; o currículo foi gerado só com o perfil-mestre.';
@@ -54,6 +55,19 @@ interface Renderizacao {
   falhou: boolean;
 }
 
+interface EstadoGeracao {
+  curriculoId?: string;
+  contexto?: { contexto: FonteContexto[]; degradacao: string | null };
+  rascunho?: { rascunho: unknown; promptVersion: string; modelo?: string | null; uso?: { chamadas: number }; requisicoes?: number };
+  verificacoes?: { estado: unknown; rejeitadas: unknown[]; uso?: { chamadas: number }; requisicoes?: number }[];
+  reparos?: { reparos: unknown[]; uso?: { chamadas: number }; requisicoes?: number }[];
+  montagem?: ResultadoPasso;
+  cortes?: Record<string, ResultadoPasso>;
+  renderizacoes?: Record<string, Omit<Renderizacao, 'docx' | 'pdf'>>;
+}
+
+type ResultadoPasso = { markdown: string; estrutura?: unknown; analiseInicial: AtsAnalysis; analiseFinal: AtsAnalysis; degradacao: string | null; promptVersion?: string | null; modelo?: string | null };
+
 export class ExecutorGeracao implements Executor {
   private readonly logger = new Logger('Geracao');
 
@@ -63,6 +77,7 @@ export class ExecutorGeracao implements Executor {
     private readonly documentos: Documentos,
     private readonly armazenamento: Armazenamento,
     private readonly rag: Pick<Rag, 'recuperar'>,
+    private readonly passos?: Executores,
   ) {}
 
   async executar(job: JobEmCurso): Promise<unknown> {
@@ -76,11 +91,16 @@ export class ExecutorGeracao implements Executor {
     if (!entrada) throw new Error(ENTRADA_AUSENTE);
     const { perfilMestre, vaga, keywords } = entrada;
 
+    const estado: EstadoGeracao = this.passos ? await this.lerEstado(job.id) : {};
     await this.prisma.geracaoCurriculo.update({ where: { id }, data: { status: 'ANALISANDO' } });
-    const { contexto, degradacao: degradacaoContexto } = await this.recuperarContexto(geracao.usuarioId, keywords);
+    const contextoSalvo = estado.contexto ?? await this.recuperarContexto(geracao.usuarioId, keywords);
+    if (this.passos && !estado.contexto) await this.gravarEstado(job.id, estado, 'contexto', contextoSalvo);
+    const { contexto, degradacao: degradacaoContexto } = contextoSalvo;
 
     await this.prisma.geracaoCurriculo.update({ where: { id }, data: { status: 'GERANDO' } });
-    const pipeline = await this.ia.gerarCurriculo({ perfilMestre, vaga, keywords, contexto }, geracao.usuarioId, `geracao:${id}`);
+    const pipeline = this.passos
+      ? await this.gerarEmPassos(job, estado, { perfilMestre, vaga, keywords, contexto })
+      : await this.ia.gerarCurriculo!({ perfilMestre, vaga, keywords, contexto }, geracao.usuarioId, `geracao:${id}`);
     await this.prisma.geracaoCurriculo.update({
       where: { id },
       data: {
@@ -93,12 +113,13 @@ export class ExecutorGeracao implements Executor {
       data: { status: 'VALIDANDO', analiseFinal: pipeline.analiseFinal as unknown as Prisma.InputJsonValue },
     });
     const versoes = await this.prisma.curriculo.count({ where: { vagaId: geracao.vagaId } });
-    const curriculoId = randomUUID();
+    const curriculoId = estado.curriculoId ?? randomUUID();
+    if (this.passos && !estado.curriculoId) await this.gravarEstado(job.id, estado, 'curriculoId', curriculoId);
 
     let markdown = pipeline.markdown;
     let analiseFinal: AtsAnalysis = pipeline.analiseFinal;
     let degradacao = mesclarDegradacao(degradacaoContexto, pipeline.degradacao);
-    let render = await this.renderizar(geracao.usuarioId, curriculoId, markdown);
+    let render = await this.renderizarSalvo(job.id, estado, geracao.usuarioId, curriculoId, markdown);
 
     let rodadas = 0;
     const estruturaGerada = pipeline.estrutura ?? null;
@@ -107,12 +128,16 @@ export class ExecutorGeracao implements Executor {
       rodadas += 1;
       this.logger.warn('curriculo com mais de uma pagina; rodada de corte de conteudo', { curriculoId, paginas: render.paginas, rodada: rodadas });
       try {
-        const reducao = await this.ia.reduzirCurriculo({ perfilMestre, vaga, keywords, estrutura: estruturaGerada, nivel: rodadas }, `geracao:${id}`);
+        let reducao = estado.cortes?.[String(rodadas)];
+        if (!reducao) {
+          reducao = await this.ia.reduzirCurriculo({ perfilMestre, vaga, keywords, estrutura: estruturaGerada, nivel: rodadas }, `geracao:${id}`);
+          if (this.passos) await this.gravarEstado(job.id, estado, 'cortes', { ...estado.cortes, [rodadas]: reducao });
+        }
         if (reducao.markdown === markdown) break;
         markdown = reducao.markdown;
         analiseFinal = reducao.analiseFinal;
         estrutura = reducao.estrutura ?? estrutura;
-        render = await this.renderizar(geracao.usuarioId, curriculoId, markdown);
+        render = await this.renderizarSalvo(job.id, estado, geracao.usuarioId, curriculoId, markdown);
       } catch (err) {
         this.logger.warn('corte de conteudo indisponivel', { curriculoId, erro: (err as Error).message });
         break;
@@ -177,6 +202,85 @@ export class ExecutorGeracao implements Executor {
     await this.semFalhar('pipeline ATS sem transicao', () =>
       aplicarNoPipeline(this.prisma, geracao.usuarioId, geracao.vagaId, { tipo: 'geracao_falhou', jobId: geracao.id, erro }),
     );
+  }
+
+  private async lerEstado(jobId: string): Promise<EstadoGeracao> {
+    const job = await this.prisma.job.findUnique({ where: { id: jobId }, select: { resultado: true } });
+    const resultado = job?.resultado as { passos?: EstadoGeracao } | null;
+    return resultado?.passos ?? {};
+  }
+
+  private async gravarEstado<K extends keyof EstadoGeracao>(jobId: string, estado: EstadoGeracao, chave: K, valor: EstadoGeracao[K]): Promise<void> {
+    estado[chave] = valor;
+    await this.prisma.job.update({ where: { id: jobId }, data: { resultado: { passos: estado } as unknown as Prisma.InputJsonValue } });
+  }
+
+  private async gerarEmPassos(job: JobEmCurso, estado: EstadoGeracao, payload: { perfilMestre: unknown; vaga: EntradaGeracao['vaga']; keywords: Keyword[]; contexto: FonteContexto[] }): Promise<ResultadoPasso> {
+    const operacao = `geracao:${job.referenciaId}`;
+    const usuarioId = job.usuarioId;
+    if (!estado.rascunho) {
+      const rascunho = await this.passos!.executar<NonNullable<EstadoGeracao['rascunho']>>('rascunho', payload, usuarioId, `${operacao}:rascunho`);
+      await this.gravarEstado(job.id, estado, 'rascunho', rascunho);
+    }
+    let chamadas = estado.rascunho?.requisicoes ?? estado.rascunho?.uso?.chamadas ?? 0;
+    const verificacoes = estado.verificacoes ?? [];
+    const reparos = estado.reparos ?? [];
+    let indice = 0;
+    while (true) {
+      await this.prisma.geracaoCurriculo.update({ where: { id: job.referenciaId }, data: { status: 'VALIDANDO' } });
+      if (!verificacoes[indice]) {
+        const anterior = indice > 0 ? verificacoes[indice - 1] : undefined;
+        const verificacao = await this.passos!.executar<NonNullable<EstadoGeracao['verificacoes']>[number]>(
+          'verificar', {
+            ...payload,
+            ...(anterior ? { estado: anterior.estado, reparos: reparos[indice - 1].reparos } : { rascunho: estado.rascunho!.rascunho }),
+            chamadasRestantes: Math.max(0, 6 - chamadas),
+          }, usuarioId, `${operacao}:verificar:${indice}`,
+        );
+        verificacoes.push(verificacao);
+        await this.gravarEstado(job.id, estado, 'verificacoes', verificacoes);
+      }
+      chamadas += verificacoes[indice].requisicoes ?? verificacoes[indice].uso?.chamadas ?? 0;
+      if (!verificacoes[indice].rejeitadas.length || chamadas >= 5) break;
+      await this.prisma.geracaoCurriculo.update({ where: { id: job.referenciaId }, data: { status: 'GERANDO' } });
+      if (!reparos[indice]) {
+        const reparo = await this.passos!.executar<NonNullable<EstadoGeracao['reparos']>[number]>(
+          'reparar', { ...payload, estado: verificacoes[indice].estado, chamadasRestantes: 6 - chamadas }, usuarioId, `${operacao}:reparar:${indice}`,
+        );
+        reparos.push(reparo);
+        await this.gravarEstado(job.id, estado, 'reparos', reparos);
+      }
+      chamadas += reparos[indice].requisicoes ?? reparos[indice].uso?.chamadas ?? 0;
+      if (!reparos[indice].reparos.length) break;
+      indice += 1;
+    }
+    await this.prisma.geracaoCurriculo.update({ where: { id: job.referenciaId }, data: { status: 'VALIDANDO' } });
+    if (!estado.montagem) {
+      const montagem = await this.passos!.executar<ResultadoPasso>(
+        'montar', { ...payload, estado: verificacoes[indice].estado }, usuarioId, `${operacao}:montar`,
+      );
+      montagem.modelo = estado.rascunho?.modelo ?? null;
+      montagem.promptVersion = estado.rascunho?.promptVersion ?? null;
+      await this.gravarEstado(job.id, estado, 'montagem', montagem);
+    }
+    return estado.montagem!;
+  }
+
+  private async renderizarSalvo(jobId: string, estado: EstadoGeracao, usuarioId: string, curriculoId: string, markdown: string): Promise<Renderizacao> {
+    if (!this.passos) return this.renderizar(usuarioId, curriculoId, markdown);
+    const chave = createHash('sha256').update(markdown).digest('hex');
+    const salva = estado.renderizacoes?.[chave];
+    if (salva) {
+      const [docx, pdf] = await Promise.all([
+        salva.docxPath ? this.armazenamento.ler(salva.docxPath) : Promise.resolve(null),
+        salva.pdfPath ? this.armazenamento.ler(salva.pdfPath) : Promise.resolve(null),
+      ]);
+      return { ...salva, docx, pdf };
+    }
+    const render = await this.renderizar(usuarioId, curriculoId, markdown);
+    const { docx: _docx, pdf: _pdf, ...dados } = render;
+    await this.gravarEstado(jobId, estado, 'renderizacoes', { ...estado.renderizacoes, [chave]: dados });
+    return render;
   }
 
   private async anexarNaConversa(usuarioId: string, jobId: string, curriculoId: string, dados: DadosNarracao): Promise<void> {

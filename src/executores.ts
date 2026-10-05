@@ -9,6 +9,8 @@ import { ExecutorExclusao } from './executores/exclusao';
 import { Agendador, AgendadorEventBridge, ExecutorLembrete } from './lembretes';
 import { Rag } from './rag';
 import type { Executores } from './worker';
+import { criarPortaExecutores } from './porta-executores';
+import type { Executores as PortaExecutores } from './porta-executores';
 
 export interface Dependencias {
   prisma: PrismaClient;
@@ -16,18 +18,20 @@ export interface Dependencias {
   documentos?: Documentos;
   armazenamento?: Armazenamento;
   agendador?: Agendador | null;
+  passos?: PortaExecutores;
 }
 
-export function montarExecutores({ prisma, ia, documentos, armazenamento, agendador }: Dependencias): Executores {
+export function montarExecutores({ prisma, ia, documentos, armazenamento, agendador, passos }: Dependencias): Executores {
   const clienteIa = ia ?? new IaHttp(new CotaTokens(prisma));
+  const porta = passos ?? (ia ? undefined : criarPortaExecutores(new CotaTokens(prisma)));
   const arquivos = armazenamento ?? new ArmazenamentoS3();
   const rag = new Rag(prisma, clienteIa);
   const agendadorLembretes = agendador === undefined
     ? process.env.AGENDADOR_MODO === 'eventbridge' ? new AgendadorEventBridge() : null
     : agendador;
   return {
-    gerar_curriculo: new ExecutorGeracao(prisma, clienteIa, documentos ?? new DocumentosHttp(), arquivos, rag),
-    extrair_keywords: new ExecutorKeywords(prisma, clienteIa),
+    gerar_curriculo: new ExecutorGeracao(prisma, clienteIa, documentos ?? new DocumentosHttp(), arquivos, rag, porta),
+    extrair_keywords: new ExecutorKeywords(prisma, clienteIa, porta),
     importar_lote: new ExecutorImportacao(prisma, clienteIa),
     reindexar_contexto: new ExecutorReindexacao(prisma, rag),
     empacotar_curriculo: new ExecutorPacote(prisma, arquivos),
