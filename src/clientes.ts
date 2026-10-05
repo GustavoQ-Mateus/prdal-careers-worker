@@ -74,8 +74,16 @@ export interface EmbeddingDocumentos {
 export interface EmbeddingConsultas {
   modelo: string;
   dimensao: number;
-  limiar: number;
   vetores: number[][];
+}
+
+export interface ConsultaComTrechos {
+  consulta: string;
+  trechos: { id: string; texto: string }[];
+}
+
+export interface FiltroTrechos {
+  consultas: { consulta: string; aceitos: string[] }[];
 }
 
 export class ErroDoServico extends Error {
@@ -195,6 +203,7 @@ export interface Ia {
   classificar(titulo: string, descricao: string): Promise<{ categoria: string; nivel: string }>;
   embeddingDocumentos(documentos: { id: string; origemId: string; tipo: string; texto: string }[]): Promise<EmbeddingDocumentos>;
   embeddingConsultas(consultas: string[]): Promise<EmbeddingConsultas>;
+  filtrarTrechos(consultas: ConsultaComTrechos[]): Promise<FiltroTrechos>;
 }
 
 export class IaHttp implements Ia {
@@ -278,6 +287,10 @@ export class IaHttp implements Ia {
 
   async embeddingConsultas(consultas: string[]): Promise<EmbeddingConsultas> {
     return (await postar('ai-service', `${this.base}/embeddings/consultas`, { consultas }, { env: this.env, timeoutMs: this.llmMs })) as EmbeddingConsultas;
+  }
+
+  async filtrarTrechos(consultas: ConsultaComTrechos[]): Promise<FiltroTrechos> {
+    return (await postar('ai-service', `${this.base}/rag/filtrar`, { consultas }, { env: this.env, timeoutMs: this.llmMs })) as FiltroTrechos;
   }
 }
 

@@ -1,6 +1,7 @@
 import { Prisma, PrismaClient } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
-import type { FonteContexto, Ia } from './clientes';
+import type { ConsultaComTrechos, FonteContexto, Ia } from './clientes';
+import { Logger } from './logger';
 
 export const TETO_CONSULTAS = 12;
 export const TETO_CHUNKS = 20;
@@ -8,6 +9,8 @@ export const POR_CONSULTA = 5;
 export const DIMENSAO_PADRAO = 384;
 export const DEGRADACAO_REINDEXACAO =
   'Parte do histórico de notas e candidaturas ainda não foi reindexada com o modelo atual e ficou fora desta geração.';
+export const DEGRADACAO_FILTRO =
+  'O histórico de notas e candidaturas não pôde ser filtrado agora e ficou fora do contexto.';
 
 export class DimensaoIncompativel extends Error {}
 
@@ -35,7 +38,12 @@ function literalVetor(vetor: number[]): string {
   return `[${vetor.join(',')}]`;
 }
 
+function chave(consulta: number, fonteId: string): string {
+  return `${consulta}:${fonteId}`;
+}
+
 interface ChunkEncontrado {
+  consulta: number;
   fonteId: string;
   texto: string;
   tipo: string;
@@ -51,6 +59,7 @@ export class Rag {
   constructor(
     private readonly prisma: PrismaClient,
     private readonly ia: Ia,
+    private readonly logger: Logger = new Logger('Rag'),
   ) {}
 
   private async exigirDimensao(dimensao: number): Promise<void> {
@@ -90,12 +99,12 @@ export class Rag {
   async recuperar(usuarioId: string, consultas: string[]): Promise<{ chunks: FonteContexto[]; degradacao: string | null }> {
     const unicas = consultasUnicas(consultas);
     if (!unicas.length) return { chunks: [], degradacao: null };
-    const { modelo, dimensao, limiar, vetores } = await this.ia.embeddingConsultas(unicas);
+    const { modelo, dimensao, vetores } = await this.ia.embeddingConsultas(unicas);
     await this.exigirDimensao(dimensao);
     const literais = vetores.map(literalVetor);
     const [encontrados, deOutroModelo] = await Promise.all([
       this.prisma.$queryRaw<ChunkEncontrado[]>`
-        SELECT r.*
+        SELECT q.n AS consulta, r.*
           FROM unnest(${literais}::text[]) WITH ORDINALITY AS q(v, n)
          CROSS JOIN LATERAL (
            SELECT c.fonte_id AS "fonteId", c.texto, d.tipo::text AS tipo, d.factual, d.titulo, d.origem::text AS origem,
@@ -109,12 +118,19 @@ export class Rag {
          ORDER BY q.n, r.similaridade DESC`,
       this.prisma.chunkRag.count({ where: { usuarioId, modelo: { not: modelo } } }),
     ]);
+    const candidatos = encontrados.map((chunk) => ({ ...chunk, consulta: Number(chunk.consulta), similaridade: Number(chunk.similaridade) }));
+    let aceitos: Set<string>;
+    try {
+      aceitos = await this.filtrar(unicas, candidatos);
+    } catch (err) {
+      this.logger.warn('degradacao: filtro do rag indisponivel', { codigo: 'filtro_rag_indisponivel', usuarioId, erro: (err as Error).message });
+      return { chunks: [], degradacao: DEGRADACAO_FILTRO };
+    }
     const melhores = new Map<string, FonteContexto & { similaridade: number }>();
-    for (const chunk of encontrados) {
-      const similaridade = Number(chunk.similaridade);
-      if (similaridade < limiar) continue;
+    for (const chunk of candidatos) {
+      if (!aceitos.has(chave(chunk.consulta, chunk.fonteId))) continue;
       const atual = melhores.get(chunk.fonteId);
-      if (atual && atual.similaridade >= similaridade) continue;
+      if (atual && atual.similaridade >= chunk.similaridade) continue;
       melhores.set(chunk.fonteId, {
         id: chunk.fonteId,
         tipo: chunk.tipo,
@@ -122,10 +138,23 @@ export class Rag {
         titulo: chunk.titulo,
         texto: chunk.texto,
         origem: chunk.origem,
-        similaridade: Math.round(similaridade * 10000) / 10000,
+        similaridade: Math.round(chunk.similaridade * 10000) / 10000,
       });
     }
     const ordenados = [...melhores.values()].sort((a, b) => b.similaridade - a.similaridade);
     return { chunks: ordenados.slice(0, TETO_CHUNKS), degradacao: deOutroModelo > 0 ? DEGRADACAO_REINDEXACAO : null };
+  }
+
+  private async filtrar(consultas: string[], encontrados: ChunkEncontrado[]): Promise<Set<string>> {
+    const grupos = new Map<number, ConsultaComTrechos>();
+    for (const chunk of encontrados) {
+      const grupo = grupos.get(chunk.consulta) ?? { consulta: consultas[chunk.consulta - 1], trechos: [] };
+      grupo.trechos.push({ id: chunk.fonteId, texto: chunk.texto });
+      grupos.set(chunk.consulta, grupo);
+    }
+    if (!grupos.size) return new Set();
+    const ordem = [...grupos.keys()];
+    const { consultas: filtradas } = await this.ia.filtrarTrechos(ordem.map((n) => grupos.get(n)!));
+    return new Set(ordem.flatMap((n, i) => (filtradas[i]?.aceitos ?? []).map((id) => chave(n, id))));
   }
 }
