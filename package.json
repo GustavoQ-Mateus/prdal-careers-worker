@@ -26,5 +26,8 @@
     "@types/archiver": "^6.0.4",
     "@types/node": "^22.20.5",
     "typescript": "^5.9.3"
+  },
+  "overrides": {
+    "deepmerge-ts": "^8.0.2"
   }
 }
