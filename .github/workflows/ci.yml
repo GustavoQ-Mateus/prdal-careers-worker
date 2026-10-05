@@ -1,0 +1,133 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verificar:
+    runs-on: ubuntu-latest
+    outputs:
+      imagem: ${{ steps.contexto.outputs.proprio }}
+    env:
+      DATABASE_URL: postgresql://teste:teste@localhost:5432/prdal_ci
+      PRDAL_TESTE_POSTGRES_URL: postgresql://teste:teste@localhost:5432/prdal_ci
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: teste
+          POSTGRES_PASSWORD: teste
+          POSTGRES_DB: prdal_ci
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U teste -d prdal_ci"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Instalar dependencias
+        run: npm ci --workspaces=false
+      - name: Verificar texto
+        run: node scripts/verificar-texto.cjs
+      - name: Compilar
+        run: npm run build
+      - name: Preparar banco descartavel
+        run: |
+          printf 'CREATE EXTENSION IF NOT EXISTS vector;' | npx prisma db execute --stdin --schema prisma/schema.prisma
+          npx prisma db push --schema prisma/schema.prisma
+      - name: Testar
+        run: npm test
+      - name: Conferir contexto proprio
+        id: contexto
+        run: |
+          if [ -f .contexto-proprio ]; then
+            echo "proprio=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Construir imagem
+        if: steps.contexto.outputs.proprio == 'true'
+        run: docker build -t unidade:${{ github.sha }} .
+      - name: Verificar vulnerabilidades
+        if: steps.contexto.outputs.proprio == 'true'
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          image-ref: unidade:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+      - name: Salvar imagem verificada
+        if: steps.contexto.outputs.proprio == 'true'
+        run: docker save unidade:${{ github.sha }} -o "${{ runner.temp }}/imagem.tar"
+      - uses: actions/upload-artifact@v4
+        if: steps.contexto.outputs.proprio == 'true'
+        with:
+          name: imagem
+          path: ${{ runner.temp }}/imagem.tar
+          retention-days: 1
+
+  publicar:
+    needs: verificar
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AWS_ROLE_ARN != '' && needs.verificar.outputs.imagem == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: publicar
+      cancel-in-progress: false
+    env:
+      AWS_PROFILE: prdal-gustavo
+      AWS_REGION: us-east-1
+      ECR_REPOSITORIO: worker
+      ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+      ECS_SERVICE: ${{ vars.ECS_SERVICE }}
+      ECS_CONTAINER: ${{ vars.ECS_CONTAINER }}
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        name: imagem
+        path: ${{ runner.temp }}
+    - uses: aws-actions/configure-aws-credentials@v6
+      with:
+        role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+        aws-region: us-east-1
+    - name: Conferir identidade
+      run: aws sts get-caller-identity --profile prdal-gustavo
+    - name: Publicar imagem verificada
+      id: imagem
+      env:
+        SHA: ${{ github.sha }}
+      run: |-
+        conta=$(aws sts get-caller-identity --profile prdal-gustavo --query Account --output text)
+        registro="$conta.dkr.ecr.$AWS_REGION.amazonaws.com"
+        aws ecr get-login-password --profile prdal-gustavo | docker login --username AWS --password-stdin "$registro"
+        docker load -i "$RUNNER_TEMP/imagem.tar"
+        imagem="$registro/$ECR_REPOSITORIO"
+        docker tag "unidade:$SHA" "$imagem:$SHA"
+        docker tag "unidade:$SHA" "$imagem:latest"
+        docker push "$imagem:$SHA"
+        docker push "$imagem:latest"
+        echo "uri=$imagem:$SHA" >> "$GITHUB_OUTPUT"
+    - name: Atualizar servico com rollback automatico
+      env:
+        IMAGEM: ${{ steps.imagem.outputs.uri }}
+      run: |-
+        test -n "$ECS_CLUSTER"
+        test -n "$ECS_SERVICE"
+        test -n "$ECS_CONTAINER"
+        anterior=$(aws ecs describe-services --profile prdal-gustavo --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" --query 'services[0].taskDefinition' --output text)
+        aws ecs describe-task-definition --profile prdal-gustavo --task-definition "$anterior" --query taskDefinition > "$RUNNER_TEMP/tarefa.json"
+        jq -e --arg nome "$ECS_CONTAINER" '.containerDefinitions | any(.name == $nome)' "$RUNNER_TEMP/tarefa.json"
+        jq --arg nome "$ECS_CONTAINER" --arg imagem "$IMAGEM" 'del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy) | (.containerDefinitions[] | select(.name == $nome) | .image) = $imagem' "$RUNNER_TEMP/tarefa.json" > "$RUNNER_TEMP/tarefa-nova.json"
+        nova=$(aws ecs register-task-definition --profile prdal-gustavo --cli-input-json "file://$RUNNER_TEMP/tarefa-nova.json" --query taskDefinition.taskDefinitionArn --output text)
+        aws ecs update-service --profile prdal-gustavo --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" --task-definition "$nova" --deployment-configuration '{"deploymentCircuitBreaker":{"enable":true,"rollback":true}}' > /dev/null
+        aws ecs wait services-stable --profile prdal-gustavo --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
+        atual=$(aws ecs describe-services --profile prdal-gustavo --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" --query 'services[0].taskDefinition' --output text)
+        test "$atual" = "$nova"
