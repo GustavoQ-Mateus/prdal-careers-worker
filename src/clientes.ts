@@ -1,5 +1,6 @@
 import { DeleteObjectsCommand, GetObjectCommand, HeadBucketCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import type { PrismaClient } from '@prisma/client';
+import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { cabecalhoRequestId } from './contexto';
 
 type Env = Record<string, string | undefined>;
@@ -313,6 +314,77 @@ export class DocumentosHttp implements Documentos {
   private async render(formato: 'pdf' | 'docx', markdown: string, template?: string): Promise<Buffer> {
     return (await postar('doc-service', `${this.base}/render/${formato}`, { markdown, template }, { env: this.env, timeoutMs: this.timeoutMs, binario: true })) as Buffer;
   }
+}
+
+type ClienteDocumentosLambda = {
+  send(comando: InvokeCommand, opcoes: { abortSignal: AbortSignal }): Promise<{ Payload?: Uint8Array; FunctionError?: string }>;
+};
+
+export class DocumentosLambda implements Documentos {
+  constructor(private readonly cliente: ClienteDocumentosLambda, private readonly env: Env = process.env) {}
+
+  renderPdf(markdown: string, template?: string): Promise<Buffer & { paginas?: number }> {
+    return this.render('pdf', markdown, template);
+  }
+
+  renderDocx(markdown: string, template?: string): Promise<Buffer> {
+    return this.render('docx', markdown, template);
+  }
+
+  private async render(formato: 'pdf' | 'docx', markdown: string, template?: string): Promise<Buffer & { paginas?: number }> {
+    const nome = this.env.LAMBDA_DOC_RENDER?.trim();
+    if (!nome) throw new Error('LAMBDA_DOC_RENDER ausente');
+    const rota = `/render/${formato}`;
+    const evento = {
+      version: '2.0',
+      routeKey: `POST ${rota}`,
+      rawPath: rota,
+      rawQueryString: '',
+      headers: { 'Content-Type': 'application/json', ...cabecalhoServico(this.env), ...cabecalhoRequestId() },
+      requestContext: { http: { method: 'POST', path: rota, protocol: 'HTTP/1.1', sourceIp: '127.0.0.1' }, stage: '$default' },
+      body: JSON.stringify({ markdown, template }),
+      isBase64Encoded: false,
+    };
+    let resposta;
+    try {
+      resposta = await this.cliente.send(new InvokeCommand({
+        FunctionName: nome,
+        InvocationType: 'RequestResponse',
+        Payload: Buffer.from(JSON.stringify(evento)),
+      }), { abortSignal: AbortSignal.timeout(ms(this.env, 'DOC_SERVICE_TIMEOUT_MS', 60_000)) });
+    } catch (err) {
+      throw new Error(`doc-service indisponivel: ${(err as Error).message}`);
+    }
+    const texto = Buffer.from(resposta.Payload ?? []).toString('utf8');
+    let dados;
+    try { dados = JSON.parse(texto); } catch {
+      throw new ErroDoServico('doc-service', 502, 'resposta invalida da lambda', texto);
+    }
+    if (resposta.FunctionError) {
+      throw new ErroDoServico('doc-service', 502, detalheDo(dados) || resposta.FunctionError, dados);
+    }
+    if (!dados || !Number.isInteger(dados.statusCode) || typeof dados.body !== 'string') {
+      throw new ErroDoServico('doc-service', 502, 'resposta invalida da lambda', dados);
+    }
+    const buffer = Buffer.from(dados.body, dados.isBase64Encoded ? 'base64' : 'utf8');
+    if (dados.statusCode < 200 || dados.statusCode >= 300) {
+      let corpo: unknown = buffer.toString('utf8');
+      try { corpo = JSON.parse(corpo as string); } catch {}
+      throw new ErroDoServico('doc-service', dados.statusCode, detalheDo(corpo), corpo);
+    }
+    const cabecalho = Object.entries(dados.headers ?? {}).find(([nome]) => nome.toLowerCase() === 'x-paginas')?.[1];
+    const paginas = typeof cabecalho === 'string' && /^\d+$/.test(cabecalho) ? Number(cabecalho) : 0;
+    if (Number.isSafeInteger(paginas) && paginas > 0) Object.assign(buffer, { paginas });
+    return buffer;
+  }
+}
+
+export function criarDocumentos(env: Env = process.env): Documentos {
+  if (env.DOCUMENTOS_MODO === 'lambda') {
+    return new DocumentosLambda(new LambdaClient({ region: env.AWS_REGION ?? 'us-east-1' }), env);
+  }
+  if (!env.DOCUMENTOS_MODO || env.DOCUMENTOS_MODO === 'http') return new DocumentosHttp(env);
+  throw new Error(`DOCUMENTOS_MODO invalido: ${env.DOCUMENTOS_MODO}`);
 }
 
 export interface Armazenamento {
