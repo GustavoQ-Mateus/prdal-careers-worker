@@ -1,5 +1,5 @@
 import type { PrismaClient } from '@prisma/client';
-import { Armazenamento, CotaTokens, Documentos, DocumentosHttp, Ia, IaHttp, ArmazenamentoS3 } from './clientes';
+import { Armazenamento, CotaTokens, Documentos, criarDocumentos, Ia, IaHttp, ArmazenamentoS3 } from './clientes';
 import { ExecutorGeracao } from './executores/geracao';
 import { ExecutorKeywords } from './executores/keywords';
 import { ExecutorImportacao, ExecutorReindexacao } from './executores/lotes';
@@ -30,7 +30,7 @@ export function montarExecutores({ prisma, ia, documentos, armazenamento, agenda
     ? process.env.AGENDADOR_MODO === 'eventbridge' ? new AgendadorEventBridge() : null
     : agendador;
   return {
-    gerar_curriculo: new ExecutorGeracao(prisma, clienteIa, documentos ?? new DocumentosHttp(), arquivos, rag, porta),
+    gerar_curriculo: new ExecutorGeracao(prisma, clienteIa, documentos ?? criarDocumentos(), arquivos, rag, porta),
     extrair_keywords: new ExecutorKeywords(prisma, clienteIa, porta),
     importar_lote: new ExecutorImportacao(prisma, clienteIa),
     reindexar_contexto: new ExecutorReindexacao(prisma, rag),
