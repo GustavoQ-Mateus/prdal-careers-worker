@@ -20,7 +20,7 @@
     "@prisma/client": "^6.19.3",
     "archiver": "^7.0.1",
     "prisma": "^6.19.3",
-    "@prdal/contracts": "github:GustavoQ-Mateus/prdal-careers-contracts#v1.0.0"
+    "@prdal/contracts": "github:GustavoQ-Mateus/prdal-careers-contracts#v1.1.0"
   },
   "devDependencies": {
     "@types/archiver": "^6.0.4",
